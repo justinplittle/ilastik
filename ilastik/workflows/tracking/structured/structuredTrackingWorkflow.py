@@ -42,6 +42,23 @@ from ilastik.plugins import pluginManager
 import logging
 logger = logging.getLogger(__name__)
 
+SOLVER = None
+try:
+    import multiHypoTracking_with_cplex as mht
+    SOLVER = "CPLEX"
+except ImportError:
+    try:
+        import multiHypoTracking_with_gurobi as mht
+        SOLVER = "GUROBI"
+    except ImportError:
+        try:
+            import dpct
+            SOLVER = "DPCT"
+            logger.warning("Could not find any ILP solver (CPLEX or GUROBI). Tracking will use flow-based solver (DPCT). " + \
+                           "Learning for tracking including crop selection and training for tracking will be disabled!")
+        except ImportError:
+            raise ImportError("Could not find any solver.")
+
 class StructuredTrackingWorkflowBase( Workflow ):
     workflowName = "Structured Learning Tracking Workflow BASE"
 
@@ -112,6 +129,14 @@ class StructuredTrackingWorkflowBase( Workflow ):
         self.trackingApplet = StructuredTrackingApplet( name="Tracking - Structured Learning", workflow=self )
         opStructuredTracking = self.trackingApplet.topLevelOperator
 
+        if SOLVER=="CPLEX" or SOLVER=="GUROBI":
+            self._solver="ILP"
+        elif SOLVER=="DPCT":
+            self._solver="Flow-based"
+        else:
+            self._solver=None
+        opStructuredTracking._solver = self._solver
+
         self.default_tracking_export_filename = '{dataset_dir}/{nickname}-tracking_exported_data.csv'
         self.dataExportTrackingApplet = TrackingBaseDataExportApplet(self, "Tracking Result Export",default_export_filename=self.default_tracking_export_filename)
         opDataExportTracking = self.dataExportTrackingApplet.topLevelOperator
@@ -157,13 +182,24 @@ class StructuredTrackingWorkflowBase( Workflow ):
         opCellClassification.AllowDeleteLastLabelOnly.setValue(True)
         opCellClassification.EnableLabelTransfer.setValue(False)
 
+        self._with_progress_bar = True
         if workflow_cmdline_args:
+
+            if '--testFullAnnotations' in workflow_cmdline_args:
+                self.testFullAnnotations = True
+            else:
+                self.testFullAnnotations = False
+
+            if '--without_progress_bar' in workflow_cmdline_args:
+                self._with_progress_bar = False
+
             self._data_export_args, unused_args = self.dataExportTrackingApplet.parse_known_cmdline_args( workflow_cmdline_args )
             self._batch_input_args, unused_args = self.batchProcessingApplet.parse_known_cmdline_args( workflow_cmdline_args )
         else:
             unused_args = None
             self._data_export_args = None
             self._batch_input_args = None
+            self.testFullAnnotations = False
 
         if unused_args:
             logger.warn("Unused command-line args: {}".format( unused_args ))
@@ -326,53 +362,116 @@ class StructuredTrackingWorkflowBase( Workflow ):
         self.cropSelectionApplet.topLevelOperator[lane_index].Crops.setValue(
             self.trackingApplet.topLevelOperator[loaded_project_lane_index].Crops.value)
 
-        logger.info("Test: Structured Learning")
-        weights = self.trackingApplet.topLevelOperator[lane_index]._runStructuredLearning(
-            z_range,
-            parameters['maxObj'],
-            parameters['max_nearest_neighbors'],
-            parameters['maxDist'],
-            parameters['divThreshold'],
-            [parameters['scales'][0],parameters['scales'][1],parameters['scales'][2]],
-            parameters['size_range'],
-            parameters['withDivisions'],
-            parameters['borderAwareWidth'],
-            parameters['withClassifierPrior'],
-            withBatchProcessing=True)
-        logger.info("weights: {}".format(weights))
+        def runLearningAndTracking(withMergerResolution=True):
+            logger.info("Test: Structured Learning")
+            weights = self.trackingApplet.topLevelOperator[lane_index]._runStructuredLearning(
+                z_range,
+                parameters['maxObj'],
+                parameters['max_nearest_neighbors'],
+                parameters['maxDist'],
+                parameters['divThreshold'],
+                [parameters['scales'][0],parameters['scales'][1],parameters['scales'][2]],
+                parameters['size_range'],
+                parameters['withDivisions'],
+                parameters['borderAwareWidth'],
+                parameters['withClassifierPrior'],
+                withBatchProcessing=True)
+            logger.info("weights: {}".format(weights))
 
-        logger.info("Test: Tracking")
-        self.trackingApplet.topLevelOperator[lane_index].track(
-            time_range = time_enum,
-            x_range = x_range,
-            y_range = y_range,
-            z_range = z_range,
-            size_range = parameters['size_range'],
-            x_scale = parameters['scales'][0],
-            y_scale = parameters['scales'][1],
-            z_scale = parameters['scales'][2],
-            maxDist=parameters['maxDist'],
-            maxObj = parameters['maxObj'],
-            divThreshold=parameters['divThreshold'],
-            avgSize=parameters['avgSize'],
-            withTracklets=parameters['withTracklets'],
-            sizeDependent=parameters['sizeDependent'],
-            detWeight=parameters['detWeight'],
-            divWeight=parameters['divWeight'],
-            transWeight=parameters['transWeight'],
-            withDivisions=parameters['withDivisions'],
-            withOpticalCorrection=parameters['withOpticalCorrection'],
-            withClassifierPrior=parameters['withClassifierPrior'],
-            ndim=ndim,
-            withMergerResolution=parameters['withMergerResolution'],
-            borderAwareWidth = parameters['borderAwareWidth'],
-            withArmaCoordinates = parameters['withArmaCoordinates'],
-            cplex_timeout = parameters['cplex_timeout'],
-            appearance_cost = parameters['appearanceCost'],
-            disappearance_cost = parameters['disappearanceCost'],
-            force_build_hypotheses_graph = False,
-            withBatchProcessing = True
-        )
+            logger.info("Test: Tracking")
+            result = self.trackingApplet.topLevelOperator[lane_index].track(
+                time_range = time_enum,
+                x_range = x_range,
+                y_range = y_range,
+                z_range = z_range,
+                size_range = parameters['size_range'],
+                x_scale = parameters['scales'][0],
+                y_scale = parameters['scales'][1],
+                z_scale = parameters['scales'][2],
+                maxDist=parameters['maxDist'],
+                maxObj = parameters['maxObj'],
+                divThreshold=parameters['divThreshold'],
+                avgSize=parameters['avgSize'],
+                withTracklets=parameters['withTracklets'],
+                sizeDependent=parameters['sizeDependent'],
+                detWeight=parameters['detWeight'],
+                divWeight=parameters['divWeight'],
+                transWeight=parameters['transWeight'],
+                withDivisions=parameters['withDivisions'],
+                withOpticalCorrection=parameters['withOpticalCorrection'],
+                withClassifierPrior=parameters['withClassifierPrior'],
+                ndim=ndim,
+                withMergerResolution=withMergerResolution,
+                borderAwareWidth = parameters['borderAwareWidth'],
+                withArmaCoordinates = parameters['withArmaCoordinates'],
+                cplex_timeout = parameters['cplex_timeout'],
+                appearance_cost = parameters['appearanceCost'],
+                disappearance_cost = parameters['disappearanceCost'],
+                force_build_hypotheses_graph = False,
+                withBatchProcessing = True
+            )
+
+            return result
+
+        if self.testFullAnnotations:
+
+            self.result = runLearningAndTracking(withMergerResolution=False)
+
+            hypothesesGraph = self.trackingApplet.topLevelOperator[lane_index].HypothesesGraph.value
+            #hypothesesGraph.insertEnergies()
+            hypothesesGraph.insertSolution(self.result)
+            hypothesesGraph.computeLineage()
+            solution = hypothesesGraph.getSolutionDictionary()
+            annotations = self.trackingApplet.topLevelOperator[lane_index].Annotations.value
+
+            # assuming one crop == the whole dataset
+            key = annotations.keys()[0]
+            annotations = annotations[key]
+            self.trackingApplet.topLevelOperator[lane_index].insertAnnotationsToHypothesesGraph(hypothesesGraph,annotations,misdetectionLabel=-1)
+            hypothesesGraph.computeLineage()
+            solutionFromAnnotations = hypothesesGraph.getSolutionDictionary()
+
+            for key in solution.keys():
+                if key == 'detectionResults':
+                    detectionFlag = True
+                    for i in range(len(solution[key])):
+                        flag = False
+                        for j in range(len(solutionFromAnnotations[key])):
+                            if solution[key][i]['id'] == solutionFromAnnotations[key][j]['id'] and \
+                                solution[key][i]['value'] == solutionFromAnnotations[key][j]['value']:
+                                flag = True
+                                break
+                        detectionFlag &= flag
+                elif key == 'divisionResults':
+                    divisionFlag = True
+                    for i in range(len(solution[key])):
+                        flag = False
+                        for j in range(len(solutionFromAnnotations[key])):
+                            if solution[key][i]['id'] == solutionFromAnnotations[key][j]['id'] and \
+                                solution[key][i]['value'] == solutionFromAnnotations[key][j]['value']:
+                                flag = True
+                                break
+                        divisionFlag &= flag
+                elif key == 'linkingResults':
+                    linkingFlag = True
+                    for i in range(len(solution[key])):
+                        flag = False
+                        for j in range(len(solutionFromAnnotations[key])):
+                            if solution[key][i]['dest'] == solutionFromAnnotations[key][j]['dest'] and \
+                                solution[key][i]['src'] == solutionFromAnnotations[key][j]['src']:
+                                if solution[key][i]['gap'] == solutionFromAnnotations[key][j]['gap'] and \
+                                    solution[key][i]['value'] == solutionFromAnnotations[key][j]['value']:
+                                    flag = True
+                                    break
+                        linkingFlag &= flag
+
+            assert detectionFlag, "Detection results are NOT correct. They differ from your annotated detections."
+            logger.info("Detection results are correct.")
+            assert divisionFlag, "Division results are NOT correct. They differ from your annotated divisions."
+            logger.info("Division results are correct.")
+            assert linkingFlag, "Transition results are NOT correct. They differ from your annotated transitions."
+            logger.info("Transition results are correct.")
+        self.result = runLearningAndTracking(withMergerResolution=parameters['withMergerResolution'])
 
     def post_process_lane_export(self, lane_index, checkOverwriteFiles=False):
         # FIXME: This probably only works for the non-blockwise export slot.
@@ -512,6 +611,9 @@ class StructuredTrackingWorkflowBase( Workflow ):
 
         opStructuredTracking = self.trackingApplet.topLevelOperator
         structured_tracking_ready = objectCountClassifier_ready
+
+        withIlpSolver = (self._solver=="ILP")
+
         busy = False
         busy |= self.dataSelectionApplet.busy
         busy |= self.annotationsApplet.busy
@@ -527,9 +629,9 @@ class StructuredTrackingWorkflowBase( Workflow ):
         self._shell.setAppletEnabled(self.trackingFeatureExtractionApplet, thresholding_ready and not busy)
         self._shell.setAppletEnabled(self.cellClassificationApplet, tracking_features_ready and not busy)
         self._shell.setAppletEnabled(self.divisionDetectionApplet, tracking_features_ready and not busy)
-        self._shell.setAppletEnabled(self.cropSelectionApplet, thresholding_ready and not busy)
+        self._shell.setAppletEnabled(self.cropSelectionApplet, thresholding_ready and not busy) # and withIlpSolver)
         self._shell.setAppletEnabled(self.objectExtractionApplet, not busy)
-        self._shell.setAppletEnabled(self.annotationsApplet, features_ready and not busy)
+        self._shell.setAppletEnabled(self.annotationsApplet, features_ready and not busy) # and withIlpSolver)
         # self._shell.setAppletEnabled(self.dataExportAnnotationsApplet, annotations_ready and not busy and \
         #                                 self.dataExportAnnotationsApplet.topLevelOperator.Inputs[0][0].ready() )
         self._shell.setAppletEnabled(self.trackingApplet, objectCountClassifier_ready and not busy)
@@ -538,14 +640,14 @@ class StructuredTrackingWorkflowBase( Workflow ):
 
 class StructuredTrackingWorkflowFromBinary( StructuredTrackingWorkflowBase ):
     workflowName = "Structured Learning Tracking Workflow from binary image"
-    workflowDisplayName = "(BETA) Tracking with Learning [Inputs: Raw Data, Binary Image]"
+    workflowDisplayName = "Tracking with Learning [Inputs: Raw Data, Binary Image]"
     workflowDescription = "Structured learning tracking of objects, based on binary images."
 
     fromBinary = True
 
 class StructuredTrackingWorkflowFromPrediction( StructuredTrackingWorkflowBase ):
     workflowName = "Structured Learning Tracking Workflow from prediction image"
-    workflowDisplayName = "(BETA) Tracking with Learning [Inputs: Raw Data, Pixel Prediction Map]"
+    workflowDisplayName = "Tracking with Learning [Inputs: Raw Data, Pixel Prediction Map]"
     workflowDescription = "Structured learning tracking of objects, based on prediction maps."
 
     fromBinary = False
