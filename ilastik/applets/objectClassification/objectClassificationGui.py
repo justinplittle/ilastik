@@ -21,8 +21,10 @@
 from PyQt4.QtGui import *
 from PyQt4 import uic
 from PyQt4.QtCore import pyqtSignal, pyqtSlot, Qt, QObject, pyqtBoundSignal, QSize, QStringList
-from PyQt4.QtGui import QFileDialog, QTableWidget, QTableWidgetItem, QGridLayout, QColor
+from PyQt4.QtGui import QFileDialog, QTableWidget, QTableWidgetItem, QGridLayout, QColor, QProgressBar
 from ilastik.shell.gui.ipcManager import IPCFacade, Protocol
+
+from lazyflow.request import Request
 
 from ilastik.widgets.featureTableWidget import FeatureEntry
 from ilastik.widgets.featureDlg import FeatureDlg
@@ -947,6 +949,8 @@ class LabelAssistDialog(QDialog):
     def __init__(self, parent, topLevelOperatorView):
         super(LabelAssistDialog, self).__init__(parent)
         
+        self.threadRouter = ThreadRouter(self)
+
         # Set object classification operator view
         self.topLevelOperatorView = topLevelOperatorView
         
@@ -971,27 +975,47 @@ class LabelAssistDialog(QDialog):
         layout.addWidget(self.table, 1, 0, 3, 2) 
 
         # Create and add close button
-        closeButton = QPushButton('Compute Areas')
-        closeButton.clicked.connect(self._populateTable)
-        layout.addWidget(closeButton, 4, 0)
+        self.computeButton = QPushButton('Compute Areas')
+        self.computeButton.clicked.connect(self._triggerTableUpdate)
+        layout.addWidget(self.computeButton, 4, 0)
+        
+        self.progressBar = QProgressBar()
+        self.progressBar.setMinimum(0)
+        self.progressBar.setMaximum(0)
+        self.progressBar.hide()
+        layout.addWidget(self.progressBar, 4, 1)
         
         # Create and add close button
         closeButton = QPushButton('Close')
         closeButton.clicked.connect(self.close)
-        layout.addWidget(closeButton, 4, 1)
+        layout.addWidget(closeButton, 5, 1)
         
         # Set dialog layout
         self.setLayout(layout)       
 
-    def _populateTable(self):
+    def _triggerTableUpdate(self):
         # Clear and prepare table
         self.table.clearContents()
         self.table.setRowCount(0)
         self.table.setSortingEnabled(False)
+        self.progressBar.show()
+        self.computeButton.setEnabled(False)
         
-        # Get object features
-        features = self.topLevelOperatorView.ObjectFeatures([]).wait()
-        labels = self.topLevelOperatorView.LabelInputs([]).wait()
+        def compute_features():
+            # Get object features
+            features = self.topLevelOperatorView.ObjectFeatures([]).wait()
+            labels = self.topLevelOperatorView.LabelInputs([]).wait()
+            return features, labels
+        
+        req = Request(compute_features)
+        req.notify_finished(self._populateTable)
+        req.submit()
+
+    @threadRouted
+    def _populateTable(self, features_and_labels):
+        features, labels = features_and_labels
+        self.progressBar.hide()
+        self.computeButton.setEnabled(True)
                 
         for frame, objectFeatures in features.iteritems():
             # Insert row
